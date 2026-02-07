@@ -164,8 +164,6 @@ OpenSSL-compatible encrypted format:
 ## Documentation
 
 - [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) - Comprehensive usage examples
-- [TEST_RESULTS.md](TEST_RESULTS.md) - Test results and verification
-- [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Technical implementation details
 
 ## Contributing
 
