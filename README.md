@@ -1,4 +1,4 @@
-# Barracuda PAR Backup Parser
+# Barracuda PAR Manager
 
 A command-line tool for parsing and extracting files from Barracuda backup archives (.par and .pca formats).
 
