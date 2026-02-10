@@ -817,9 +817,40 @@ func parseURLCond(content string) *FWURLObject {
 }
 
 func parseRuleLists(content string, ruleset *FWRuleSet) {
+	// First, parse main rules (top-level rules={} section before sublists)
+	mainRulesPattern := regexp.MustCompile(`(?s)\n\trules=\{(.*?)\n\t(sublists|[a-z]+obj)=`)
+	match := mainRulesPattern.FindStringSubmatch(content)
+
+	if len(match) > 1 {
+		mainRulesSection := match[1]
+		// Extract Rule blocks from the main rules section
+		ruleBlocks := extractBlock(mainRulesSection, "Rule")
+
+		if len(ruleBlocks) > 0 {
+			mainRuleList := &FWRuleList{
+				Name:       "Main",
+				Comment:    "Main ruleset rules",
+				RuleType:   "",
+				IsTypeList: false,
+			}
+
+			for _, rb := range ruleBlocks {
+				rule := parseRule(rb)
+				if rule.Name != "" {
+					mainRuleList.Rules = append(mainRuleList.Rules, rule)
+				}
+			}
+
+			// Add main rules as the first RuleList
+			if len(mainRuleList.Rules) > 0 {
+				ruleset.RuleLists = append(ruleset.RuleLists, mainRuleList)
+			}
+		}
+	}
+
 	// Find the sublists section
 	sublistsPattern := regexp.MustCompile(`(?s)sublists=\{(.*?)\n\t[a-z]+[=\}]`)
-	match := sublistsPattern.FindStringSubmatch(content)
+	match = sublistsPattern.FindStringSubmatch(content)
 
 	var sublistsSection string
 	if len(match) > 1 {
@@ -837,7 +868,7 @@ func parseRuleLists(content string, ruleset *FWRuleSet) {
 		return
 	}
 
-	// Extract all RuleList blocks
+	// Extract all RuleList blocks from sublists
 	ruleListBlocks := extractBlock(sublistsSection, "RuleList")
 
 	for _, block := range ruleListBlocks {
