@@ -40,6 +40,13 @@ type FWServiceObject struct {
 	Ports   []string // "TCP/80", "UDP/53", etc.
 }
 
+// FWUserObject represents a user object definition
+type FWUserObject struct {
+	Name    string
+	Comment string
+	Users   []string // Regular users, VPN users, groups, etc.
+}
+
 // FWRuleSet represents the entire ruleset
 type FWRuleSet struct {
 	Name           string
@@ -47,6 +54,7 @@ type FWRuleSet struct {
 	Rules          []FWRule
 	NetObjects     map[string]*FWNetObject
 	ServiceObjects map[string]*FWServiceObject
+	UserObjects    map[string]*FWUserObject
 	SubSets        map[string]*FWRuleSet
 }
 
@@ -197,6 +205,7 @@ func ParseFWRuleFile(content string) *FWRuleSet {
 	ruleset := &FWRuleSet{
 		NetObjects:     make(map[string]*FWNetObject),
 		ServiceObjects: make(map[string]*FWServiceObject),
+		UserObjects:    make(map[string]*FWUserObject),
 		SubSets:        make(map[string]*FWRuleSet),
 	}
 
@@ -209,6 +218,9 @@ func ParseFWRuleFile(content string) *FWRuleSet {
 
 	// Extract service objects
 	parseServiceObjects(content, ruleset)
+
+	// Extract user objects
+	parseUserObjects(content, ruleset)
 
 	// Extract rules
 	parseRules(content, ruleset)
@@ -385,6 +397,102 @@ func parseServiceSet(content string) *FWServiceObject {
 		for _, r := range refs {
 			if len(r) > 1 && r[1] != "" {
 				obj.Ports = append(obj.Ports, "@"+r[1])
+			}
+		}
+	}
+
+	return obj
+}
+
+func parseUserObjects(content string, ruleset *FWRuleSet) {
+	// Find userobj section
+	userObjPattern := regexp.MustCompile(`(?s)userobj=\{(.*?)\n\t[a-z]+obj=`)
+	match := userObjPattern.FindStringSubmatch(content)
+	if len(match) < 2 {
+		// Try alternate pattern for end of file
+		userObjPattern = regexp.MustCompile(`(?s)userobj=\{(.*?)\n\truleobj=`)
+		match = userObjPattern.FindStringSubmatch(content)
+	}
+
+	if len(match) > 1 {
+		userSection := match[1]
+
+		// Parse UserSet objects
+		userSets := extractBlock(userSection, "UserSet")
+		for _, us := range userSets {
+			obj := parseUserSet(us)
+			if obj.Name != "" {
+				ruleset.UserObjects[obj.Name] = obj
+			}
+		}
+	}
+}
+
+func parseUserSet(content string) *FWUserObject {
+	obj := &FWUserObject{}
+	obj.Name = extractValue(content, "name")
+	obj.Comment = extractValue(content, "comment")
+
+	// Track unique users to avoid duplicates
+	seen := make(map[string]bool)
+
+	// Extract regular users
+	userPattern := regexp.MustCompile(`user=\{([^}]+)\}`)
+	users := userPattern.FindAllStringSubmatch(content, -1)
+	for _, u := range users {
+		if len(u) > 1 && u[1] != "" {
+			user := strings.TrimSpace(u[1])
+			if user != "?*" && !seen[user] {
+				obj.Users = append(obj.Users, "user:"+user)
+				seen[user] = true
+			} else if user == "?*" && !seen["user:*"] {
+				obj.Users = append(obj.Users, "user:*")
+				seen["user:*"] = true
+			}
+		}
+	}
+
+	// Extract VPN users
+	vpnUserPattern := regexp.MustCompile(`VPNuser=\{([^}]+)\}`)
+	vpnUsers := vpnUserPattern.FindAllStringSubmatch(content, -1)
+	for _, u := range vpnUsers {
+		if len(u) > 1 && u[1] != "" {
+			user := strings.TrimSpace(u[1])
+			key := "vpn:" + user
+			if user != "?*" && !seen[key] {
+				obj.Users = append(obj.Users, "vpn:"+user)
+				seen[key] = true
+			} else if user == "?*" && !seen["vpn:*"] {
+				obj.Users = append(obj.Users, "vpn:*")
+				seen["vpn:*"] = true
+			}
+		}
+	}
+
+	// Extract VPN groups
+	vpnGroupPattern := regexp.MustCompile(`VPNgroup=\{([^}]+)\}`)
+	vpnGroups := vpnGroupPattern.FindAllStringSubmatch(content, -1)
+	for _, g := range vpnGroups {
+		if len(g) > 1 && g[1] != "" {
+			group := strings.TrimSpace(g[1])
+			key := "vpngroup:" + group
+			if group != "" && !seen[key] {
+				obj.Users = append(obj.Users, "vpngroup:"+group)
+				seen[key] = true
+			}
+		}
+	}
+
+	// Extract groups
+	groupsPattern := regexp.MustCompile(`groups=\{([^}]+)\}`)
+	groups := groupsPattern.FindAllStringSubmatch(content, -1)
+	for _, g := range groups {
+		if len(g) > 1 && g[1] != "" {
+			group := strings.TrimSpace(g[1])
+			key := "group:" + group
+			if group != "" && !seen[key] {
+				obj.Users = append(obj.Users, "group:"+group)
+				seen[key] = true
 			}
 		}
 	}
@@ -639,8 +747,26 @@ func parseAction(content string) (string, string) {
 	return "UNKNOWN", ""
 }
 
+// OutputOptions controls what sections to include in output
+type OutputOptions struct {
+	ShowNetworks bool
+	ShowServices bool
+	ShowUsers    bool
+	ShowRules    bool
+}
+
+// AllSections returns options to show all sections
+func AllSections() OutputOptions {
+	return OutputOptions{ShowNetworks: true, ShowServices: true, ShowUsers: true, ShowRules: true}
+}
+
 // FormatCompact returns a compact human-readable representation
 func (rs *FWRuleSet) FormatCompact() string {
+	return rs.FormatCompactSelective(AllSections())
+}
+
+// FormatCompactSelective returns a compact representation with selective sections
+func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 	var sb strings.Builder
 
 	sb.WriteString("=" + strings.Repeat("=", 79) + "\n")
@@ -651,7 +777,7 @@ func (rs *FWRuleSet) FormatCompact() string {
 	sb.WriteString("=" + strings.Repeat("=", 79) + "\n\n")
 
 	// Network Objects summary
-	if len(rs.NetObjects) > 0 {
+	if opts.ShowNetworks && len(rs.NetObjects) > 0 {
 		sb.WriteString("NETWORK OBJECTS:\n")
 		sb.WriteString(strings.Repeat("-", 40) + "\n")
 
@@ -677,7 +803,7 @@ func (rs *FWRuleSet) FormatCompact() string {
 	}
 
 	// Service Objects summary
-	if len(rs.ServiceObjects) > 0 {
+	if opts.ShowServices && len(rs.ServiceObjects) > 0 {
 		sb.WriteString("SERVICE OBJECTS:\n")
 		sb.WriteString(strings.Repeat("-", 40) + "\n")
 
@@ -695,48 +821,72 @@ func (rs *FWRuleSet) FormatCompact() string {
 		sb.WriteString("\n")
 	}
 
-	// Rules
-	sb.WriteString("FIREWALL RULES:\n")
-	sb.WriteString(strings.Repeat("-", 80) + "\n")
-	sb.WriteString(fmt.Sprintf("%-4s %-25s %-8s %-20s %-20s\n", "#", "NAME", "ACTION", "SOURCE", "DESTINATION"))
-	sb.WriteString(strings.Repeat("-", 80) + "\n")
+	// User Objects summary
+	if opts.ShowUsers && len(rs.UserObjects) > 0 {
+		sb.WriteString("USER OBJECTS:\n")
+		sb.WriteString(strings.Repeat("-", 40) + "\n")
 
-	for i, rule := range rs.Rules {
-		status := ""
-		if rule.Deactivated {
-			status = "[OFF] "
+		names := make([]string, 0, len(rs.UserObjects))
+		for name := range rs.UserObjects {
+			names = append(names, name)
 		}
+		sort.Strings(names)
 
-		action := rule.Action
-		if rule.ActionDetail != "" {
-			action = fmt.Sprintf("%s→%s", rule.Action, truncate(rule.ActionDetail, 10))
+		for _, name := range names {
+			obj := rs.UserObjects[name]
+			users := strings.Join(obj.Users, ", ")
+			if len(users) > 50 {
+				users = users[:47] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("  %-30s = %s\n", name, users))
 		}
-
-		src := formatNetList(rule.Source)
-		dst := formatNetList(rule.Destination)
-
-		sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
-			i+1, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
-
-		// Service line if not "Any"
-		svcStr := formatSvcList(rule.Service)
-		if svcStr != "Any" && svcStr != "@Any" {
-			sb.WriteString(fmt.Sprintf("     Service: %s\n", svcStr))
-		}
-
-		// Comment if present
-		if rule.Comment != "" {
-			sb.WriteString(fmt.Sprintf("     # %s\n", rule.Comment))
-		}
-
-		// MAC if present
-		if rule.MAC != "" {
-			sb.WriteString(fmt.Sprintf("     MAC: %s\n", rule.MAC))
-		}
+		sb.WriteString("\n")
 	}
 
-	sb.WriteString(strings.Repeat("-", 80) + "\n")
-	sb.WriteString(fmt.Sprintf("Total: %d rules\n", len(rs.Rules)))
+	// Rules
+	if opts.ShowRules {
+		sb.WriteString("FIREWALL RULES:\n")
+		sb.WriteString(strings.Repeat("-", 80) + "\n")
+		sb.WriteString(fmt.Sprintf("%-4s %-25s %-8s %-20s %-20s\n", "#", "NAME", "ACTION", "SOURCE", "DESTINATION"))
+		sb.WriteString(strings.Repeat("-", 80) + "\n")
+
+		for i, rule := range rs.Rules {
+			status := ""
+			if rule.Deactivated {
+				status = "[OFF] "
+			}
+
+			action := rule.Action
+			if rule.ActionDetail != "" {
+				action = fmt.Sprintf("%s→%s", rule.Action, truncate(rule.ActionDetail, 10))
+			}
+
+			src := formatNetList(rule.Source)
+			dst := formatNetList(rule.Destination)
+
+			sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
+				i+1, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
+
+			// Service line if not "Any"
+			svcStr := formatSvcList(rule.Service)
+			if svcStr != "Any" && svcStr != "@Any" {
+				sb.WriteString(fmt.Sprintf("     Service: %s\n", svcStr))
+			}
+
+			// Comment if present
+			if rule.Comment != "" {
+				sb.WriteString(fmt.Sprintf("     # %s\n", rule.Comment))
+			}
+
+			// MAC if present
+			if rule.MAC != "" {
+				sb.WriteString(fmt.Sprintf("     MAC: %s\n", rule.MAC))
+			}
+		}
+
+		sb.WriteString(strings.Repeat("-", 80) + "\n")
+		sb.WriteString(fmt.Sprintf("Total: %d rules\n", len(rs.Rules)))
+	}
 
 	return sb.String()
 }
@@ -794,13 +944,18 @@ func (rs *FWRuleSet) FormatDetailed() string {
 
 // FormatDiffable returns a format optimized for diff comparison
 func (rs *FWRuleSet) FormatDiffable() string {
+	return rs.FormatDiffableSelective(AllSections())
+}
+
+// FormatDiffableSelective returns a diff-friendly format with selective sections
+func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("# Ruleset: %s\n", rs.Name))
 	sb.WriteString(fmt.Sprintf("# Comment: %s\n\n", rs.Comment))
 
 	// Network objects (sorted for stable diff)
-	if len(rs.NetObjects) > 0 {
+	if opts.ShowNetworks && len(rs.NetObjects) > 0 {
 		sb.WriteString("## Network Objects\n")
 		names := make([]string, 0, len(rs.NetObjects))
 		for name := range rs.NetObjects {
@@ -817,7 +972,7 @@ func (rs *FWRuleSet) FormatDiffable() string {
 	}
 
 	// Service objects (sorted)
-	if len(rs.ServiceObjects) > 0 {
+	if opts.ShowServices && len(rs.ServiceObjects) > 0 {
 		sb.WriteString("## Service Objects\n")
 		names := make([]string, 0, len(rs.ServiceObjects))
 		for name := range rs.ServiceObjects {
@@ -833,35 +988,54 @@ func (rs *FWRuleSet) FormatDiffable() string {
 		sb.WriteString("\n")
 	}
 
-	// Rules
-	sb.WriteString("## Rules\n")
-	for i, rule := range rs.Rules {
-		status := ""
-		if rule.Deactivated {
-			status = " [DISABLED]"
+	// User objects (sorted)
+	if opts.ShowUsers && len(rs.UserObjects) > 0 {
+		sb.WriteString("## User Objects\n")
+		names := make([]string, 0, len(rs.UserObjects))
+		for name := range rs.UserObjects {
+			names = append(names, name)
 		}
+		sort.Strings(names)
 
-		sort.Strings(rule.Source)
-		sort.Strings(rule.Destination)
-		sort.Strings(rule.Service)
-
-		actionStr := rule.Action
-		if rule.ActionDetail != "" {
-			actionStr = fmt.Sprintf("%s(%s)", rule.Action, rule.ActionDetail)
-		}
-
-		sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", i+1, rule.Name, status))
-		sb.WriteString(fmt.Sprintf("  SRC: %s\n", strings.Join(rule.Source, " | ")))
-		sb.WriteString(fmt.Sprintf("  DST: %s\n", strings.Join(rule.Destination, " | ")))
-		sb.WriteString(fmt.Sprintf("  SVC: %s\n", strings.Join(rule.Service, " | ")))
-		sb.WriteString(fmt.Sprintf("  ACT: %s\n", actionStr))
-		if rule.Comment != "" {
-			sb.WriteString(fmt.Sprintf("  CMT: %s\n", rule.Comment))
-		}
-		if rule.MAC != "" {
-			sb.WriteString(fmt.Sprintf("  MAC: %s\n", rule.MAC))
+		for _, name := range names {
+			obj := rs.UserObjects[name]
+			sort.Strings(obj.Users)
+			sb.WriteString(fmt.Sprintf("USR %s = %s\n", name, strings.Join(obj.Users, " | ")))
 		}
 		sb.WriteString("\n")
+	}
+
+	// Rules
+	if opts.ShowRules {
+		sb.WriteString("## Rules\n")
+		for i, rule := range rs.Rules {
+			status := ""
+			if rule.Deactivated {
+				status = " [DISABLED]"
+			}
+
+			sort.Strings(rule.Source)
+			sort.Strings(rule.Destination)
+			sort.Strings(rule.Service)
+
+			actionStr := rule.Action
+			if rule.ActionDetail != "" {
+				actionStr = fmt.Sprintf("%s(%s)", rule.Action, rule.ActionDetail)
+			}
+
+			sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", i+1, rule.Name, status))
+			sb.WriteString(fmt.Sprintf("  SRC: %s\n", strings.Join(rule.Source, " | ")))
+			sb.WriteString(fmt.Sprintf("  DST: %s\n", strings.Join(rule.Destination, " | ")))
+			sb.WriteString(fmt.Sprintf("  SVC: %s\n", strings.Join(rule.Service, " | ")))
+			sb.WriteString(fmt.Sprintf("  ACT: %s\n", actionStr))
+			if rule.Comment != "" {
+				sb.WriteString(fmt.Sprintf("  CMT: %s\n", rule.Comment))
+			}
+			if rule.MAC != "" {
+				sb.WriteString(fmt.Sprintf("  MAC: %s\n", rule.MAC))
+			}
+			sb.WriteString("\n")
+		}
 	}
 
 	return sb.String()

@@ -796,9 +796,13 @@ Commands:
   diff      Compare two archives
 
   Firewall Rules:
-  fwrules   Show firewall rules in compact format
-  fwdetail  Show firewall rules in detailed format
-  fwdiff    Compare firewall rules between two backups
+  fwrules    Show firewall rules in compact format
+  fwdetail   Show firewall rules in detailed format
+  fwdiff     Compare firewall rules between two backups
+  fwnetworks Show only network objects from firewall rules
+  fwservices Show only service objects from firewall rules
+  fwusers    Show only user objects from firewall rules
+  fwruleonly Show only firewall rules (no objects)
 
 Options:
   -f, --filter <pattern>   Filter entries by pattern
@@ -812,6 +816,13 @@ Options:
   -F, --flat               Extract files without directory structure
   -P, --password <password> Password for encrypted .pca files
                            (prompted securely if not provided)
+
+  Firewall Rule Options (fwrules command only):
+  -n, --networks           Show only network objects
+  -S, --services           Show only service objects
+  -U, --users              Show only user objects
+  -r, --rules              Show only rules (no objects)
+                           (combine flags to show multiple sections)
 
 Examples:
   par_parser list backup.par
@@ -833,6 +844,15 @@ Examples:
   Firewall Rules:
   par_parser fwrules backup.par
   par_parser fwrules -d backup.par
+  par_parser fwrules -n backup.par              (show only network objects)
+  par_parser fwrules -S backup.par              (show only service objects)
+  par_parser fwrules -U backup.par              (show only user objects)
+  par_parser fwrules -r backup.par              (show only rules)
+  par_parser fwrules -n -S -U backup.par        (show networks, services, and users)
+  par_parser fwnetworks backup.par              (dedicated command for networks)
+  par_parser fwservices backup.par              (dedicated command for services)
+  par_parser fwusers backup.par                 (dedicated command for users)
+  par_parser fwruleonly backup.par              (dedicated command for rules only)
   par_parser fwdetail backup.par
   par_parser fwdiff old.par new.par
 
@@ -853,6 +873,7 @@ func main() {
 	// Parse flags
 	var filter, output, ext, fwPath, password string
 	var showSize, showContent, showUnchanged, diffable, flat bool
+	var showNetworks, showServices, showUsers, showRules bool
 	args := os.Args[2:]
 	var positionalArgs []string
 
@@ -897,6 +918,14 @@ func main() {
 			diffable = true
 		case "-F", "--flat":
 			flat = true
+		case "-n", "--networks":
+			showNetworks = true
+		case "-S", "--services":
+			showServices = true
+		case "-U", "--users":
+			showUsers = true
+		case "-r", "--rules":
+			showRules = true
 		default:
 			positionalArgs = append(positionalArgs, args[i])
 		}
@@ -1006,10 +1035,100 @@ func main() {
 			os.Exit(1)
 		}
 		ruleset := ParseFWRuleFile(fwContent)
-		if diffable {
-			fmt.Print(ruleset.FormatDiffable())
+
+		// Determine what to show based on flags
+		opts := OutputOptions{}
+		if !showNetworks && !showServices && !showUsers && !showRules {
+			// No flags specified, show all (default behavior)
+			opts = AllSections()
 		} else {
-			fmt.Print(ruleset.FormatCompact())
+			// Show only requested sections
+			opts.ShowNetworks = showNetworks
+			opts.ShowServices = showServices
+			opts.ShowUsers = showUsers
+			opts.ShowRules = showRules
+		}
+
+		if diffable {
+			fmt.Print(ruleset.FormatDiffableSelective(opts))
+		} else {
+			fmt.Print(ruleset.FormatCompactSelective(opts))
+		}
+
+	case "fwnetworks":
+		archive, err := LoadArchive(positionalArgs[0], password)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		fwContent := findFWRuleContent(archive, fwPath)
+		if fwContent == "" {
+			fmt.Println("Error: No firewall rule file found")
+			os.Exit(1)
+		}
+		ruleset := ParseFWRuleFile(fwContent)
+		opts := OutputOptions{ShowNetworks: true}
+		if diffable {
+			fmt.Print(ruleset.FormatDiffableSelective(opts))
+		} else {
+			fmt.Print(ruleset.FormatCompactSelective(opts))
+		}
+
+	case "fwservices":
+		archive, err := LoadArchive(positionalArgs[0], password)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		fwContent := findFWRuleContent(archive, fwPath)
+		if fwContent == "" {
+			fmt.Println("Error: No firewall rule file found")
+			os.Exit(1)
+		}
+		ruleset := ParseFWRuleFile(fwContent)
+		opts := OutputOptions{ShowServices: true}
+		if diffable {
+			fmt.Print(ruleset.FormatDiffableSelective(opts))
+		} else {
+			fmt.Print(ruleset.FormatCompactSelective(opts))
+		}
+
+	case "fwusers":
+		archive, err := LoadArchive(positionalArgs[0], password)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		fwContent := findFWRuleContent(archive, fwPath)
+		if fwContent == "" {
+			fmt.Println("Error: No firewall rule file found")
+			os.Exit(1)
+		}
+		ruleset := ParseFWRuleFile(fwContent)
+		opts := OutputOptions{ShowUsers: true}
+		if diffable {
+			fmt.Print(ruleset.FormatDiffableSelective(opts))
+		} else {
+			fmt.Print(ruleset.FormatCompactSelective(opts))
+		}
+
+	case "fwruleonly":
+		archive, err := LoadArchive(positionalArgs[0], password)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		fwContent := findFWRuleContent(archive, fwPath)
+		if fwContent == "" {
+			fmt.Println("Error: No firewall rule file found")
+			os.Exit(1)
+		}
+		ruleset := ParseFWRuleFile(fwContent)
+		opts := OutputOptions{ShowRules: true}
+		if diffable {
+			fmt.Print(ruleset.FormatDiffableSelective(opts))
+		} else {
+			fmt.Print(ruleset.FormatCompactSelective(opts))
 		}
 
 	case "fwdetail":
