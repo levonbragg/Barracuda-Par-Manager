@@ -1331,7 +1331,9 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 					// Handle GROUP action as section separators (but still count them)
 					if rule.Action == "GROUP" {
 						sb.WriteString("\n")
-						sb.WriteString(fmt.Sprintf("%-4d ┌─ SECTION: %s", ruleNum, rule.Name))
+						// Strip RuleList prefix from section name too
+						sectionName := stripRuleListPrefix(rule.Name, ruleList.Name)
+						sb.WriteString(fmt.Sprintf("%-4d ┌─ SECTION: %s", ruleNum, sectionName))
 						if rule.Comment != "" {
 							sb.WriteString(fmt.Sprintf(" (%s)", rule.Comment))
 						}
@@ -1355,8 +1357,11 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 					src := formatNetList(rule.Source)
 					dst := formatNetList(rule.Destination)
 
+					// Strip RuleList prefix from rule name for cleaner display
+					displayName := stripRuleListPrefix(rule.Name, ruleList.Name)
+
 					sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
-						ruleNum, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
+						ruleNum, status, truncate(displayName, 25), action, truncate(src, 20), truncate(dst, 20)))
 
 					// Service line if not "Any"
 					svcStr := formatSvcList(rule.Service)
@@ -1414,6 +1419,7 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 				src := formatNetList(rule.Source)
 				dst := formatNetList(rule.Destination)
 
+				// For flat lists, we can't strip prefixes as there's no RuleList context
 				sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
 					ruleNum, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
 
@@ -1485,7 +1491,9 @@ func (rs *FWRuleSet) FormatDetailed() string {
 				// Handle GROUP action as section separators (but still count them)
 				if rule.Action == "GROUP" {
 					sb.WriteString(strings.Repeat("─", 79) + "\n")
-					sb.WriteString(fmt.Sprintf("Rule #%d [SECTION]: %s\n", ruleNum, rule.Name))
+					// Strip RuleList prefix from section name too
+					sectionName := stripRuleListPrefix(rule.Name, ruleList.Name)
+					sb.WriteString(fmt.Sprintf("Rule #%d [SECTION]: %s\n", ruleNum, sectionName))
 					if rule.Comment != "" {
 						sb.WriteString(fmt.Sprintf("Description: %s\n", rule.Comment))
 					}
@@ -1499,7 +1507,10 @@ func (rs *FWRuleSet) FormatDetailed() string {
 					status = "DISABLED"
 				}
 
-				sb.WriteString(fmt.Sprintf("Rule #%d: %s [%s]\n", ruleNum, rule.Name, status))
+				// Strip RuleList prefix from rule name for cleaner display
+				displayName := stripRuleListPrefix(rule.Name, ruleList.Name)
+
+				sb.WriteString(fmt.Sprintf("Rule #%d: %s [%s]\n", ruleNum, displayName, status))
 				sb.WriteString(strings.Repeat("-", 50) + "\n")
 
 				if rule.Comment != "" {
@@ -1715,7 +1726,9 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 				for _, rule := range ruleList.Rules {
 					// Handle GROUP action as section separators (but still count them)
 					if rule.Action == "GROUP" {
-						sb.WriteString(fmt.Sprintf("RULE %03d [SECTION]: %s", ruleNum, rule.Name))
+						// Strip RuleList prefix from section name too
+						sectionName := stripRuleListPrefix(rule.Name, ruleList.Name)
+						sb.WriteString(fmt.Sprintf("RULE %03d [SECTION]: %s", ruleNum, sectionName))
 						if rule.Comment != "" {
 							sb.WriteString(fmt.Sprintf(" (%s)", rule.Comment))
 						}
@@ -1740,7 +1753,10 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 						actionStr = fmt.Sprintf("%s(%s)", rule.Action, rule.ActionDetail)
 					}
 
-					sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", ruleNum, rule.Name, status))
+					// Strip RuleList prefix from rule name for cleaner display
+					displayName := stripRuleListPrefix(rule.Name, ruleList.Name)
+
+					sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", ruleNum, displayName, status))
 					sb.WriteString(fmt.Sprintf("  LIST: %s\n", ruleList.Name))
 					sb.WriteString(fmt.Sprintf("  SRC: %s\n", strings.Join(rule.Source, " | ")))
 					sb.WriteString(fmt.Sprintf("  DST: %s\n", strings.Join(rule.Destination, " | ")))
@@ -1966,4 +1982,16 @@ func statusStr(deactivated bool) string {
 		return "DISABLED"
 	}
 	return "ACTIVE"
+}
+
+// stripRuleListPrefix removes the RuleList name prefix from rule names
+// e.g., "<App>:Teams" in the <App> list becomes "Teams"
+// e.g., "Inbound:SMTP-Rule" in the Inbound list becomes "SMTP-Rule"
+func stripRuleListPrefix(ruleName, listName string) string {
+	// Try exact prefix match with colon
+	prefix := listName + ":"
+	if strings.HasPrefix(ruleName, prefix) {
+		return strings.TrimPrefix(ruleName, prefix)
+	}
+	return ruleName
 }
