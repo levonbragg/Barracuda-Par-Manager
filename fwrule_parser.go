@@ -25,12 +25,47 @@ type FWRule struct {
 	MAC         string   // MAC address if specified
 }
 
+// FWNetMember represents a single member in a network object
+type FWNetMember struct {
+	Addr    string // IP address or subnet
+	Ref     string // Reference to another object
+	Dev     string // Interface/device name
+	Comment string // Comment for this specific member
+	MAC     string // MAC address
+}
+
+// String returns a formatted string representation of the member
+func (m *FWNetMember) String() string {
+	parts := []string{}
+
+	if m.Addr != "" {
+		parts = append(parts, m.Addr)
+	}
+	if m.Ref != "" {
+		parts = append(parts, "@"+m.Ref)
+	}
+	if m.Dev != "" {
+		parts = append(parts, "dev:"+m.Dev)
+	}
+	if m.MAC != "" {
+		parts = append(parts, "mac:"+m.MAC)
+	}
+	if m.Comment != "" {
+		parts = append(parts, "# "+m.Comment)
+	}
+
+	return strings.Join(parts, " ")
+}
+
 // FWNetObject represents a network object definition
 type FWNetObject struct {
-	Name    string
-	Type    string // dns, set, entry
-	Comment string
-	Members []string
+	Name        string
+	Type        string // dns, set, entry
+	NetType     string // Network type description based on netType field
+	NetTypeCode string // Raw netType value
+	Comment     string
+	Members     []*FWNetMember
+	Excluded    []*FWNetMember // Excluded entries from neglist
 }
 
 // FWServiceObject represents a service object definition
@@ -326,32 +361,105 @@ func parseNetObjects(content string, ruleset *FWRuleSet) {
 	}
 }
 
+// getNetTypeDescription converts netType code to human-readable description
+func getNetTypeDescription(netType string) string {
+	switch netType {
+	case "1":
+		return "Single IPv4 Address"
+	case "2":
+		return "List of IPv4 Addresses"
+	case "3":
+		return "Single IPv4 Network"
+	case "4":
+		return "List of IPv4 Networks"
+	case "5":
+		return "DNS Resolved"
+	case "6":
+		return "Single IPv6 Address"
+	case "7":
+		return "List of IPv6 Addresses"
+	case "8":
+		return "Single IPv6 Network"
+	case "9":
+		return "List of IPv6 Networks"
+	default:
+		return "Generic Network Object"
+	}
+}
+
 func parseNetSet(content string) *FWNetObject {
 	obj := &FWNetObject{Type: "set"}
 	obj.Name = extractValue(content, "name")
 	obj.Comment = extractValue(content, "comment")
 
-	// Check for DNS type
-	netType := extractValue(content, "netType")
-	if netType == "5" {
+	// Extract and interpret netType
+	obj.NetTypeCode = extractValue(content, "netType")
+	obj.NetType = getNetTypeDescription(obj.NetTypeCode)
+
+	// Keep legacy DNS type detection for compatibility
+	if obj.NetTypeCode == "5" {
 		obj.Type = "dns"
 	}
 
-	// Extract members
-	// Look for NetEntry and NetRef
-	entryPattern := regexp.MustCompile(`addr=\{([^}]+)\}`)
-	entries := entryPattern.FindAllStringSubmatch(content, -1)
-	for _, e := range entries {
-		if len(e) > 1 && e[1] != "" {
-			obj.Members = append(obj.Members, e[1])
+	// Extract NetEntry blocks from list (most detailed, includes addr, dev, mac, comment)
+	listPattern := regexp.MustCompile(`(?s)list=\{(.*?)\n\t\t\}`)
+	if listMatch := listPattern.FindStringSubmatch(content); len(listMatch) > 1 {
+		listSection := listMatch[1]
+		entryBlocks := extractBlock(listSection, "NetEntry")
+		for _, block := range entryBlocks {
+			member := &FWNetMember{}
+
+			// Extract all possible fields
+			member.Addr = extractValue(block, "addr")
+			member.Dev = extractValue(block, "dev")
+			member.MAC = extractValue(block, "mac")
+			member.Comment = extractValue(block, "comment")
+
+			// Only add if at least one field has content (skip placeholder entries)
+			if member.Addr != "" || member.Dev != "" || member.MAC != "" {
+				obj.Members = append(obj.Members, member)
+			}
+		}
+
+		// Extract NetRef blocks (references to other objects) from list
+		refBlocks := extractBlock(listSection, "NetRef")
+		for _, block := range refBlocks {
+			refValue := extractValue(block, "ref")
+			if refValue != "" && refValue != "Matching" {
+				member := &FWNetMember{Ref: refValue}
+				obj.Members = append(obj.Members, member)
+			}
 		}
 	}
 
-	refPattern := regexp.MustCompile(`ref=\{([^}]+)\}`)
-	refs := refPattern.FindAllStringSubmatch(content, -1)
-	for _, r := range refs {
-		if len(r) > 1 && r[1] != "" {
-			obj.Members = append(obj.Members, "@"+r[1])
+	// Extract NetEntry blocks from neglist (excluded entries)
+	neglistPattern := regexp.MustCompile(`(?s)neglist=\{(.*?)\n\t\t\}`)
+	if neglistMatch := neglistPattern.FindStringSubmatch(content); len(neglistMatch) > 1 {
+		neglistSection := neglistMatch[1]
+		entryBlocks := extractBlock(neglistSection, "NetEntry")
+		for _, block := range entryBlocks {
+			member := &FWNetMember{}
+
+			// Extract all possible fields
+			member.Addr = extractValue(block, "addr")
+			member.Dev = extractValue(block, "dev")
+			member.MAC = extractValue(block, "mac")
+			member.Comment = extractValue(block, "comment")
+
+			// Only add if at least one field has content
+			if member.Addr != "" || member.Dev != "" || member.MAC != "" {
+				obj.Excluded = append(obj.Excluded, member)
+			}
+		}
+
+		// Extract NetRef blocks from neglist
+		refBlocks := extractBlock(neglistSection, "NetRef")
+		for _, block := range refBlocks {
+			refValue := extractValue(block, "ref")
+			if refValue != "" && refValue != "Matching" {
+				member := &FWNetMember{Ref: refValue}
+				obj.Excluded = append(obj.Excluded, member)
+			}
 		}
 	}
 
@@ -947,14 +1055,35 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 		for _, name := range names {
 			obj := rs.NetObjects[name]
 			typeStr := ""
-			if obj.Type == "dns" {
+			if obj.NetType != "Generic Network Object" && obj.NetType != "" {
+				typeStr = fmt.Sprintf(" [%s]", obj.NetType)
+			} else if obj.Type == "dns" {
 				typeStr = " [DNS]"
 			}
-			members := strings.Join(obj.Members, ", ")
+
+			// Format members
+			memberStrs := make([]string, len(obj.Members))
+			for i, m := range obj.Members {
+				memberStrs[i] = m.String()
+			}
+			members := strings.Join(memberStrs, ", ")
 			if len(members) > 50 {
 				members = members[:47] + "..."
 			}
 			sb.WriteString(fmt.Sprintf("  %-30s%s = %s\n", name, typeStr, members))
+
+			// Show excluded entries if present
+			if len(obj.Excluded) > 0 {
+				excludedStrs := make([]string, len(obj.Excluded))
+				for i, m := range obj.Excluded {
+					excludedStrs[i] = m.String()
+				}
+				excluded := strings.Join(excludedStrs, ", ")
+				if len(excluded) > 50 {
+					excluded = excluded[:47] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("  %-30s   EXCLUDED: %s\n", "", excluded))
+			}
 		}
 		sb.WriteString("\n")
 	}
@@ -1149,8 +1278,30 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 
 		for _, name := range names {
 			obj := rs.NetObjects[name]
-			sort.Strings(obj.Members)
-			sb.WriteString(fmt.Sprintf("NET %s = %s\n", name, strings.Join(obj.Members, " | ")))
+
+			// Add type annotation if present
+			typeAnnotation := ""
+			if obj.NetType != "Generic Network Object" && obj.NetType != "" {
+				typeAnnotation = fmt.Sprintf(" [%s]", obj.NetType)
+			}
+
+			// Format members for diffable output
+			memberStrs := make([]string, len(obj.Members))
+			for i, m := range obj.Members {
+				memberStrs[i] = m.String()
+			}
+			sort.Strings(memberStrs)
+			sb.WriteString(fmt.Sprintf("NET %s%s = %s\n", name, typeAnnotation, strings.Join(memberStrs, " | ")))
+
+			// Show excluded entries if present
+			if len(obj.Excluded) > 0 {
+				excludedStrs := make([]string, len(obj.Excluded))
+				for i, m := range obj.Excluded {
+					excludedStrs[i] = m.String()
+				}
+				sort.Strings(excludedStrs)
+				sb.WriteString(fmt.Sprintf("NET %s EXCLUDED = %s\n", name, strings.Join(excludedStrs, " | ")))
+			}
 		}
 		sb.WriteString("\n")
 	}
