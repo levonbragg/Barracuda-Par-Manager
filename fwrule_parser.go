@@ -25,6 +25,15 @@ type FWRule struct {
 	MAC         string   // MAC address if specified
 }
 
+// FWRuleList represents a logical grouping of firewall rules
+type FWRuleList struct {
+	Name        string   // Name of the rule list (e.g., "Inbound", "<App>", "<SDWAN>")
+	Comment     string   // Description of the rule list
+	RuleType    string   // Type description for angle bracket names (e.g., "Application Rules")
+	IsTypeList  bool     // True if name is in angle brackets
+	Rules       []FWRule // Rules in this list
+}
+
 // FWNetMember represents a single member in a network object
 type FWNetMember struct {
 	Addr    string // IP address or subnet
@@ -95,7 +104,8 @@ type FWRuleSet struct {
 	Name              string
 	Comment           string
 	EvalPolicyGlobal  bool // true = Policy Profiles Format, false = Legacy Application Rule Set
-	Rules             []FWRule
+	Rules             []FWRule           // Deprecated: kept for backwards compatibility, use RuleLists instead
+	RuleLists         []*FWRuleList      // Organized rules by their parent RuleList
 	NetObjects        map[string]*FWNetObject
 	ServiceObjects    map[string]*FWServiceObject
 	UserObjects       map[string]*FWUserObject
@@ -119,6 +129,44 @@ func (rs *FWRuleSet) IsPolicyProfilesFormat() bool {
 // IsLegacyFormat returns true if using the legacy Application Rule Set format
 func (rs *FWRuleSet) IsLegacyFormat() bool {
 	return !rs.EvalPolicyGlobal
+}
+
+// GetAllRules returns all rules from all rule lists (for backwards compatibility)
+func (rs *FWRuleSet) GetAllRules() []FWRule {
+	var allRules []FWRule
+	for _, list := range rs.RuleLists {
+		allRules = append(allRules, list.Rules...)
+	}
+	// If RuleLists is empty, fall back to the old Rules field
+	if len(allRules) == 0 && len(rs.Rules) > 0 {
+		return rs.Rules
+	}
+	return allRules
+}
+
+// getRuleTypeDescription returns a human-readable description for angle bracket rule types
+func getRuleTypeDescription(name string) string {
+	// Extract the name from angle brackets
+	if len(name) > 2 && name[0] == '<' && name[len(name)-1] == '>' {
+		typeName := name[1 : len(name)-1]
+		switch strings.ToUpper(typeName) {
+		case "APP":
+			return "Application Rules"
+		case "SDWAN":
+			return "SD-WAN Rules"
+		case "NAT":
+			return "NAT Rules"
+		case "ACCESS":
+			return "Access Rules"
+		case "FORWARD":
+			return "Forwarding Rules"
+		case "VPN":
+			return "VPN Rules"
+		default:
+			return typeName + " Rules"
+		}
+	}
+	return ""
 }
 
 // Token types for the parser
@@ -293,8 +341,13 @@ func ParseFWRuleFile(content string) *FWRuleSet {
 	// Extract URL filtering objects
 	parseURLObjects(content, ruleset)
 
-	// Extract rules
-	parseRules(content, ruleset)
+	// Extract rules organized by RuleList
+	parseRuleLists(content, ruleset)
+
+	// Also parse flat rules for backwards compatibility (if no RuleLists found)
+	if len(ruleset.RuleLists) == 0 {
+		parseRules(content, ruleset)
+	}
 
 	return ruleset
 }
@@ -763,6 +816,70 @@ func parseURLCond(content string) *FWURLObject {
 	return obj
 }
 
+func parseRuleLists(content string, ruleset *FWRuleSet) {
+	// Find the sublists section
+	sublistsPattern := regexp.MustCompile(`(?s)sublists=\{(.*?)\n\t[a-z]+[=\}]`)
+	match := sublistsPattern.FindStringSubmatch(content)
+
+	var sublistsSection string
+	if len(match) > 1 {
+		sublistsSection = match[1]
+	} else {
+		// Try alternate pattern for end of file
+		sublistsPattern = regexp.MustCompile(`(?s)sublists=\{(.*)\}[\s]*$`)
+		match = sublistsPattern.FindStringSubmatch(content)
+		if len(match) > 1 {
+			sublistsSection = match[1]
+		}
+	}
+
+	if sublistsSection == "" {
+		return
+	}
+
+	// Extract all RuleList blocks
+	ruleListBlocks := extractBlock(sublistsSection, "RuleList")
+
+	for _, block := range ruleListBlocks {
+		ruleList := parseRuleList(block)
+		if ruleList.Name != "" {
+			ruleset.RuleLists = append(ruleset.RuleLists, ruleList)
+		}
+	}
+}
+
+func parseRuleList(content string) *FWRuleList {
+	ruleList := &FWRuleList{}
+	ruleList.Name = extractValue(content, "name")
+	ruleList.Comment = extractValue(content, "comment")
+
+	// Check if this is an angle bracket type list
+	if len(ruleList.Name) > 2 && ruleList.Name[0] == '<' && ruleList.Name[len(ruleList.Name)-1] == '>' {
+		ruleList.IsTypeList = true
+		ruleList.RuleType = getRuleTypeDescription(ruleList.Name)
+	}
+
+	// Extract rules within this RuleList
+	// Rules are inside rules={...} block
+	rulesPattern := regexp.MustCompile(`(?s)rules=\{(.*?)\n\t\t\}`)
+	match := rulesPattern.FindStringSubmatch(content)
+
+	if len(match) > 1 {
+		rulesSection := match[1]
+		// Extract Rule blocks from within the rules section
+		ruleBlocks := extractBlock(rulesSection, "Rule")
+
+		for _, rb := range ruleBlocks {
+			rule := parseRule(rb)
+			if rule.Name != "" {
+				ruleList.Rules = append(ruleList.Rules, rule)
+			}
+		}
+	}
+
+	return ruleList
+}
+
 func parseRules(content string, ruleset *FWRuleSet) {
 	ruleBlocks := extractBlock(content, "\t\tRule")
 
@@ -1155,49 +1272,110 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 		sb.WriteString("\n")
 	}
 
-	// Rules
+	// Rules (organized by RuleList)
 	if opts.ShowRules {
 		sb.WriteString("FIREWALL RULES:\n")
-		sb.WriteString(strings.Repeat("-", 80) + "\n")
-		sb.WriteString(fmt.Sprintf("%-4s %-25s %-8s %-20s %-20s\n", "#", "NAME", "ACTION", "SOURCE", "DESTINATION"))
-		sb.WriteString(strings.Repeat("-", 80) + "\n")
+		sb.WriteString(strings.Repeat("=", 80) + "\n")
 
-		for i, rule := range rs.Rules {
-			status := ""
-			if rule.Deactivated {
-				status = "[OFF] "
+		totalRules := 0
+
+		// If we have RuleLists, display rules organized by list
+		if len(rs.RuleLists) > 0 {
+			for _, ruleList := range rs.RuleLists {
+				// Display RuleList header
+				listHeader := ruleList.Name
+				if ruleList.IsTypeList && ruleList.RuleType != "" {
+					listHeader = fmt.Sprintf("%s - %s", ruleList.Name, ruleList.RuleType)
+				}
+				sb.WriteString(fmt.Sprintf("\n[%s]\n", listHeader))
+				if ruleList.Comment != "" {
+					sb.WriteString(fmt.Sprintf("Comment: %s\n", ruleList.Comment))
+				}
+				sb.WriteString(strings.Repeat("-", 80) + "\n")
+				sb.WriteString(fmt.Sprintf("%-4s %-25s %-8s %-20s %-20s\n", "#", "NAME", "ACTION", "SOURCE", "DESTINATION"))
+				sb.WriteString(strings.Repeat("-", 80) + "\n")
+
+				for i, rule := range ruleList.Rules {
+					status := ""
+					if rule.Deactivated {
+						status = "[OFF] "
+					}
+
+					action := rule.Action
+					if rule.ActionDetail != "" {
+						action = fmt.Sprintf("%s→%s", rule.Action, truncate(rule.ActionDetail, 10))
+					}
+
+					src := formatNetList(rule.Source)
+					dst := formatNetList(rule.Destination)
+
+					sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
+						i+1, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
+
+					// Service line if not "Any"
+					svcStr := formatSvcList(rule.Service)
+					if svcStr != "Any" && svcStr != "@Any" {
+						sb.WriteString(fmt.Sprintf("     Service: %s\n", svcStr))
+					}
+
+					// Comment if present
+					if rule.Comment != "" {
+						sb.WriteString(fmt.Sprintf("     # %s\n", rule.Comment))
+					}
+
+					// MAC if present
+					if rule.MAC != "" {
+						sb.WriteString(fmt.Sprintf("     MAC: %s\n", rule.MAC))
+					}
+
+					totalRules++
+				}
+
+				sb.WriteString(fmt.Sprintf("\nRules in %s: %d\n", ruleList.Name, len(ruleList.Rules)))
 			}
+		} else {
+			// Fallback to flat list if no RuleLists
+			sb.WriteString(fmt.Sprintf("%-4s %-25s %-8s %-20s %-20s\n", "#", "NAME", "ACTION", "SOURCE", "DESTINATION"))
+			sb.WriteString(strings.Repeat("-", 80) + "\n")
 
-			action := rule.Action
-			if rule.ActionDetail != "" {
-				action = fmt.Sprintf("%s→%s", rule.Action, truncate(rule.ActionDetail, 10))
+			for i, rule := range rs.Rules {
+				status := ""
+				if rule.Deactivated {
+					status = "[OFF] "
+				}
+
+				action := rule.Action
+				if rule.ActionDetail != "" {
+					action = fmt.Sprintf("%s→%s", rule.Action, truncate(rule.ActionDetail, 10))
+				}
+
+				src := formatNetList(rule.Source)
+				dst := formatNetList(rule.Destination)
+
+				sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
+					i+1, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
+
+				// Service line if not "Any"
+				svcStr := formatSvcList(rule.Service)
+				if svcStr != "Any" && svcStr != "@Any" {
+					sb.WriteString(fmt.Sprintf("     Service: %s\n", svcStr))
+				}
+
+				// Comment if present
+				if rule.Comment != "" {
+					sb.WriteString(fmt.Sprintf("     # %s\n", rule.Comment))
+				}
+
+				// MAC if present
+				if rule.MAC != "" {
+					sb.WriteString(fmt.Sprintf("     MAC: %s\n", rule.MAC))
+				}
 			}
-
-			src := formatNetList(rule.Source)
-			dst := formatNetList(rule.Destination)
-
-			sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
-				i+1, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
-
-			// Service line if not "Any"
-			svcStr := formatSvcList(rule.Service)
-			if svcStr != "Any" && svcStr != "@Any" {
-				sb.WriteString(fmt.Sprintf("     Service: %s\n", svcStr))
-			}
-
-			// Comment if present
-			if rule.Comment != "" {
-				sb.WriteString(fmt.Sprintf("     # %s\n", rule.Comment))
-			}
-
-			// MAC if present
-			if rule.MAC != "" {
-				sb.WriteString(fmt.Sprintf("     MAC: %s\n", rule.MAC))
-			}
+			totalRules = len(rs.Rules)
 		}
 
-		sb.WriteString(strings.Repeat("-", 80) + "\n")
-		sb.WriteString(fmt.Sprintf("Total: %d rules\n", len(rs.Rules)))
+		sb.WriteString(strings.Repeat("=", 80) + "\n")
+		sb.WriteString(fmt.Sprintf("Total: %d rules across %d rule lists\n", totalRules, len(rs.RuleLists)))
 	}
 
 	return sb.String()
@@ -1207,48 +1385,112 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 func (rs *FWRuleSet) FormatDetailed() string {
 	var sb strings.Builder
 
+	allRules := rs.GetAllRules()
+
 	sb.WriteString("=" + strings.Repeat("=", 79) + "\n")
 	sb.WriteString(fmt.Sprintf("FIREWALL RULESET: %s\n", rs.Name))
 	if rs.Comment != "" {
 		sb.WriteString(fmt.Sprintf("Description: %s\n", rs.Comment))
 	}
-	sb.WriteString(fmt.Sprintf("Total Rules: %d\n", len(rs.Rules)))
+	sb.WriteString(fmt.Sprintf("Format: %s\n", rs.FormatType()))
+	sb.WriteString(fmt.Sprintf("Total Rules: %d\n", len(allRules)))
+	if len(rs.RuleLists) > 0 {
+		sb.WriteString(fmt.Sprintf("Rule Lists: %d\n", len(rs.RuleLists)))
+	}
 	sb.WriteString("=" + strings.Repeat("=", 79) + "\n\n")
 
-	for i, rule := range rs.Rules {
-		status := "ACTIVE"
-		if rule.Deactivated {
-			status = "DISABLED"
-		}
+	ruleNum := 1
 
-		sb.WriteString(fmt.Sprintf("Rule #%d: %s [%s]\n", i+1, rule.Name, status))
-		sb.WriteString(strings.Repeat("-", 50) + "\n")
+	// If we have RuleLists, display rules organized by list
+	if len(rs.RuleLists) > 0 {
+		for _, ruleList := range rs.RuleLists {
+			// Display RuleList header
+			sb.WriteString(strings.Repeat("=", 79) + "\n")
+			listHeader := ruleList.Name
+			if ruleList.IsTypeList && ruleList.RuleType != "" {
+				listHeader = fmt.Sprintf("%s - %s", ruleList.Name, ruleList.RuleType)
+			}
+			sb.WriteString(fmt.Sprintf("RULE LIST: %s\n", listHeader))
+			if ruleList.Comment != "" {
+				sb.WriteString(fmt.Sprintf("Comment: %s\n", ruleList.Comment))
+			}
+			sb.WriteString(fmt.Sprintf("Rules: %d\n", len(ruleList.Rules)))
+			sb.WriteString(strings.Repeat("=", 79) + "\n\n")
 
-		if rule.Comment != "" {
-			sb.WriteString(fmt.Sprintf("  Comment:     %s\n", rule.Comment))
-		}
+			for _, rule := range ruleList.Rules {
+				status := "ACTIVE"
+				if rule.Deactivated {
+					status = "DISABLED"
+				}
 
-		sb.WriteString(fmt.Sprintf("  Source:      %s\n", strings.Join(rule.Source, ", ")))
-		sb.WriteString(fmt.Sprintf("  Destination: %s\n", strings.Join(rule.Destination, ", ")))
-		sb.WriteString(fmt.Sprintf("  Service:     %s\n", strings.Join(rule.Service, ", ")))
+				sb.WriteString(fmt.Sprintf("Rule #%d: %s [%s]\n", ruleNum, rule.Name, status))
+				sb.WriteString(strings.Repeat("-", 50) + "\n")
 
-		actionStr := rule.Action
-		if rule.ActionDetail != "" {
-			actionStr = fmt.Sprintf("%s (%s)", rule.Action, rule.ActionDetail)
-		}
-		sb.WriteString(fmt.Sprintf("  Action:      %s\n", actionStr))
+				if rule.Comment != "" {
+					sb.WriteString(fmt.Sprintf("  Comment:     %s\n", rule.Comment))
+				}
 
-		if rule.MAC != "" {
-			sb.WriteString(fmt.Sprintf("  MAC Filter:  %s\n", rule.MAC))
-		}
-		if rule.Dynamic {
-			sb.WriteString("  Dynamic:     Yes\n")
-		}
-		if rule.Bidirectional {
-			sb.WriteString("  Bidir:       Yes\n")
-		}
+				sb.WriteString(fmt.Sprintf("  Source:      %s\n", strings.Join(rule.Source, ", ")))
+				sb.WriteString(fmt.Sprintf("  Destination: %s\n", strings.Join(rule.Destination, ", ")))
+				sb.WriteString(fmt.Sprintf("  Service:     %s\n", strings.Join(rule.Service, ", ")))
 
-		sb.WriteString("\n")
+				actionStr := rule.Action
+				if rule.ActionDetail != "" {
+					actionStr = fmt.Sprintf("%s (%s)", rule.Action, rule.ActionDetail)
+				}
+				sb.WriteString(fmt.Sprintf("  Action:      %s\n", actionStr))
+
+				if rule.MAC != "" {
+					sb.WriteString(fmt.Sprintf("  MAC Filter:  %s\n", rule.MAC))
+				}
+				if rule.Dynamic {
+					sb.WriteString("  Dynamic:     Yes\n")
+				}
+				if rule.Bidirectional {
+					sb.WriteString("  Bidir:       Yes\n")
+				}
+
+				sb.WriteString("\n")
+				ruleNum++
+			}
+		}
+	} else {
+		// Fallback to flat list if no RuleLists
+		for i, rule := range rs.Rules {
+			status := "ACTIVE"
+			if rule.Deactivated {
+				status = "DISABLED"
+			}
+
+			sb.WriteString(fmt.Sprintf("Rule #%d: %s [%s]\n", i+1, rule.Name, status))
+			sb.WriteString(strings.Repeat("-", 50) + "\n")
+
+			if rule.Comment != "" {
+				sb.WriteString(fmt.Sprintf("  Comment:     %s\n", rule.Comment))
+			}
+
+			sb.WriteString(fmt.Sprintf("  Source:      %s\n", strings.Join(rule.Source, ", ")))
+			sb.WriteString(fmt.Sprintf("  Destination: %s\n", strings.Join(rule.Destination, ", ")))
+			sb.WriteString(fmt.Sprintf("  Service:     %s\n", strings.Join(rule.Service, ", ")))
+
+			actionStr := rule.Action
+			if rule.ActionDetail != "" {
+				actionStr = fmt.Sprintf("%s (%s)", rule.Action, rule.ActionDetail)
+			}
+			sb.WriteString(fmt.Sprintf("  Action:      %s\n", actionStr))
+
+			if rule.MAC != "" {
+				sb.WriteString(fmt.Sprintf("  MAC Filter:  %s\n", rule.MAC))
+			}
+			if rule.Dynamic {
+				sb.WriteString("  Dynamic:     Yes\n")
+			}
+			if rule.Bidirectional {
+				sb.WriteString("  Bidir:       Yes\n")
+			}
+
+			sb.WriteString("\n")
+		}
 	}
 
 	return sb.String()
@@ -1361,36 +1603,87 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 		sb.WriteString("\n")
 	}
 
-	// Rules
+	// Rules (organized by RuleList)
 	if opts.ShowRules {
 		sb.WriteString("## Rules\n")
-		for i, rule := range rs.Rules {
-			status := ""
-			if rule.Deactivated {
-				status = " [DISABLED]"
-			}
 
-			sort.Strings(rule.Source)
-			sort.Strings(rule.Destination)
-			sort.Strings(rule.Service)
+		ruleNum := 1
 
-			actionStr := rule.Action
-			if rule.ActionDetail != "" {
-				actionStr = fmt.Sprintf("%s(%s)", rule.Action, rule.ActionDetail)
-			}
+		// If we have RuleLists, display rules organized by list
+		if len(rs.RuleLists) > 0 {
+			for _, ruleList := range rs.RuleLists {
+				// Display RuleList header
+				listHeader := ruleList.Name
+				if ruleList.IsTypeList && ruleList.RuleType != "" {
+					listHeader = fmt.Sprintf("%s [%s]", ruleList.Name, ruleList.RuleType)
+				}
+				sb.WriteString(fmt.Sprintf("\n### RuleList: %s\n", listHeader))
+				if ruleList.Comment != "" {
+					sb.WriteString(fmt.Sprintf("# %s\n", ruleList.Comment))
+				}
 
-			sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", i+1, rule.Name, status))
-			sb.WriteString(fmt.Sprintf("  SRC: %s\n", strings.Join(rule.Source, " | ")))
-			sb.WriteString(fmt.Sprintf("  DST: %s\n", strings.Join(rule.Destination, " | ")))
-			sb.WriteString(fmt.Sprintf("  SVC: %s\n", strings.Join(rule.Service, " | ")))
-			sb.WriteString(fmt.Sprintf("  ACT: %s\n", actionStr))
-			if rule.Comment != "" {
-				sb.WriteString(fmt.Sprintf("  CMT: %s\n", rule.Comment))
+				for _, rule := range ruleList.Rules {
+					status := ""
+					if rule.Deactivated {
+						status = " [DISABLED]"
+					}
+
+					sort.Strings(rule.Source)
+					sort.Strings(rule.Destination)
+					sort.Strings(rule.Service)
+
+					actionStr := rule.Action
+					if rule.ActionDetail != "" {
+						actionStr = fmt.Sprintf("%s(%s)", rule.Action, rule.ActionDetail)
+					}
+
+					sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", ruleNum, rule.Name, status))
+					sb.WriteString(fmt.Sprintf("  LIST: %s\n", ruleList.Name))
+					sb.WriteString(fmt.Sprintf("  SRC: %s\n", strings.Join(rule.Source, " | ")))
+					sb.WriteString(fmt.Sprintf("  DST: %s\n", strings.Join(rule.Destination, " | ")))
+					sb.WriteString(fmt.Sprintf("  SVC: %s\n", strings.Join(rule.Service, " | ")))
+					sb.WriteString(fmt.Sprintf("  ACT: %s\n", actionStr))
+					if rule.Comment != "" {
+						sb.WriteString(fmt.Sprintf("  CMT: %s\n", rule.Comment))
+					}
+					if rule.MAC != "" {
+						sb.WriteString(fmt.Sprintf("  MAC: %s\n", rule.MAC))
+					}
+					sb.WriteString("\n")
+
+					ruleNum++
+				}
 			}
-			if rule.MAC != "" {
-				sb.WriteString(fmt.Sprintf("  MAC: %s\n", rule.MAC))
+		} else {
+			// Fallback to flat list if no RuleLists
+			for i, rule := range rs.Rules {
+				status := ""
+				if rule.Deactivated {
+					status = " [DISABLED]"
+				}
+
+				sort.Strings(rule.Source)
+				sort.Strings(rule.Destination)
+				sort.Strings(rule.Service)
+
+				actionStr := rule.Action
+				if rule.ActionDetail != "" {
+					actionStr = fmt.Sprintf("%s(%s)", rule.Action, rule.ActionDetail)
+				}
+
+				sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", i+1, rule.Name, status))
+				sb.WriteString(fmt.Sprintf("  SRC: %s\n", strings.Join(rule.Source, " | ")))
+				sb.WriteString(fmt.Sprintf("  DST: %s\n", strings.Join(rule.Destination, " | ")))
+				sb.WriteString(fmt.Sprintf("  SVC: %s\n", strings.Join(rule.Service, " | ")))
+				sb.WriteString(fmt.Sprintf("  ACT: %s\n", actionStr))
+				if rule.Comment != "" {
+					sb.WriteString(fmt.Sprintf("  CMT: %s\n", rule.Comment))
+				}
+				if rule.MAC != "" {
+					sb.WriteString(fmt.Sprintf("  MAC: %s\n", rule.MAC))
+				}
+				sb.WriteString("\n")
 			}
-			sb.WriteString("\n")
 		}
 	}
 
@@ -1422,20 +1715,23 @@ func formatSvcList(items []string) string {
 func DiffRuleSets(rs1, rs2 *FWRuleSet) string {
 	var sb strings.Builder
 
+	allRules1 := rs1.GetAllRules()
+	allRules2 := rs2.GetAllRules()
+
 	sb.WriteString("=" + strings.Repeat("=", 79) + "\n")
 	sb.WriteString("FIREWALL RULESET DIFF\n")
-	sb.WriteString(fmt.Sprintf("  Old: %s (%d rules)\n", rs1.Name, len(rs1.Rules)))
-	sb.WriteString(fmt.Sprintf("  New: %s (%d rules)\n", rs2.Name, len(rs2.Rules)))
+	sb.WriteString(fmt.Sprintf("  Old: %s (%d rules)\n", rs1.Name, len(allRules1)))
+	sb.WriteString(fmt.Sprintf("  New: %s (%d rules)\n", rs2.Name, len(allRules2)))
 	sb.WriteString("=" + strings.Repeat("=", 79) + "\n\n")
 
 	// Build rule maps by name
 	rules1 := make(map[string]FWRule)
 	rules2 := make(map[string]FWRule)
 
-	for _, r := range rs1.Rules {
+	for _, r := range allRules1 {
 		rules1[r.Name] = r
 	}
-	for _, r := range rs2.Rules {
+	for _, r := range allRules2 {
 		rules2[r.Name] = r
 	}
 
@@ -1522,7 +1818,7 @@ func DiffRuleSets(rs1, rs2 *FWRuleSet) string {
 	sb.WriteString(strings.Repeat("-", 80) + "\n")
 	sb.WriteString(fmt.Sprintf("Summary: %d removed, %d added, %d modified, %d unchanged\n",
 		len(removed), len(added), len(modified),
-		len(rs1.Rules)-len(removed)-len(modified)))
+		len(allRules1)-len(removed)-len(modified)))
 
 	return sb.String()
 }

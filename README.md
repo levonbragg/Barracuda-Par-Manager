@@ -153,6 +153,41 @@ The tool automatically detects the firewall format and adjusts output accordingl
 
 Format type is displayed in the output header for all firewall commands.
 
+#### Rule Organization
+
+Firewall rules are automatically organized by their parent RuleList for better structure and readability:
+
+- **RuleList Grouping**: Rules are displayed grouped by their logical RuleList (e.g., Inbound, Outbound, VPN)
+- **Type Detection**: RuleLists with angle bracket notation are identified as special rule types:
+  - `<App>` → Application Rules
+  - `<SDWAN>` → SD-WAN Rules
+  - `<NAT>` → NAT Rules
+  - `<VPN>` → VPN Rules
+  - And other types are automatically labeled
+- **Clear Headers**: Each RuleList section displays its name, type (if applicable), and rule count
+- **Sequential Numbering**: Rules are numbered sequentially across all lists for easy reference
+
+Example output:
+```
+[<App> - Application Rules]
+--------------------------------------------------------------------------------
+#    NAME                      ACTION   SOURCE               DESTINATION
+--------------------------------------------------------------------------------
+1    <App>:Teams               PASS     @Any                 @Any
+2    <App>:AllowedApps         PASS     @Any                 @Internet
+
+Rules in <App>: 16
+
+[Inbound]
+--------------------------------------------------------------------------------
+#    NAME                      ACTION   SOURCE               DESTINATION
+--------------------------------------------------------------------------------
+1    Inbound:SMTP              PASS     Any                  @MailServer
+2    Inbound:HTTPS             PASS     Any                  @WebServer
+
+Rules in Inbound: 10
+```
+
 ## Creating Encrypted Archives
 
 You can create encrypted .pca files using OpenSSL:
@@ -229,6 +264,7 @@ Barracuda PAR (Phionar Archive) format is a binary format that stores:
   - Service objects (TCP/UDP ports, protocols, ICMP)
   - User objects (users, VPN users, groups)
   - URL filtering objects (policy objects and match conditions)
+  - RuleLists (logical groupings of rules with type identification)
 
 ### .pca Files (Encrypted)
 
