@@ -1326,7 +1326,22 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 				sb.WriteString(fmt.Sprintf("%-4s %-25s %-8s %-20s %-20s\n", "#", "NAME", "ACTION", "SOURCE", "DESTINATION"))
 				sb.WriteString(strings.Repeat("-", 80) + "\n")
 
-				for i, rule := range ruleList.Rules {
+				ruleNum := 0
+				for _, rule := range ruleList.Rules {
+					// Handle GROUP action as section separators (but still count them)
+					if rule.Action == "GROUP" {
+						sb.WriteString("\n")
+						sb.WriteString(fmt.Sprintf("%-4d ┌─ SECTION: %s", ruleNum, rule.Name))
+						if rule.Comment != "" {
+							sb.WriteString(fmt.Sprintf(" (%s)", rule.Comment))
+						}
+						sb.WriteString("\n")
+						sb.WriteString("     │\n")
+						ruleNum++
+						totalRules++
+						continue
+					}
+
 					status := ""
 					if rule.Deactivated {
 						status = "[OFF] "
@@ -1341,7 +1356,7 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 					dst := formatNetList(rule.Destination)
 
 					sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
-						i+1, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
+						ruleNum, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
 
 					// Service line if not "Any"
 					svcStr := formatSvcList(rule.Service)
@@ -1359,6 +1374,7 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 						sb.WriteString(fmt.Sprintf("     MAC: %s\n", rule.MAC))
 					}
 
+					ruleNum++
 					totalRules++
 				}
 
@@ -1369,7 +1385,22 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 			sb.WriteString(fmt.Sprintf("%-4s %-25s %-8s %-20s %-20s\n", "#", "NAME", "ACTION", "SOURCE", "DESTINATION"))
 			sb.WriteString(strings.Repeat("-", 80) + "\n")
 
-			for i, rule := range rs.Rules {
+			ruleNum := 0
+			for _, rule := range rs.Rules {
+				// Handle GROUP action as section separators (but still count them)
+				if rule.Action == "GROUP" {
+					sb.WriteString("\n")
+					sb.WriteString(fmt.Sprintf("%-4d ┌─ SECTION: %s", ruleNum, rule.Name))
+					if rule.Comment != "" {
+						sb.WriteString(fmt.Sprintf(" (%s)", rule.Comment))
+					}
+					sb.WriteString("\n")
+					sb.WriteString("     │\n")
+					ruleNum++
+					totalRules++
+					continue
+				}
+
 				status := ""
 				if rule.Deactivated {
 					status = "[OFF] "
@@ -1384,7 +1415,7 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 				dst := formatNetList(rule.Destination)
 
 				sb.WriteString(fmt.Sprintf("%-4d %s%-25s %-8s %-20s %-20s\n",
-					i+1, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
+					ruleNum, status, truncate(rule.Name, 25), action, truncate(src, 20), truncate(dst, 20)))
 
 				// Service line if not "Any"
 				svcStr := formatSvcList(rule.Service)
@@ -1401,8 +1432,10 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 				if rule.MAC != "" {
 					sb.WriteString(fmt.Sprintf("     MAC: %s\n", rule.MAC))
 				}
+
+				ruleNum++
+				totalRules++
 			}
-			totalRules = len(rs.Rules)
 		}
 
 		sb.WriteString(strings.Repeat("=", 80) + "\n")
@@ -1430,7 +1463,7 @@ func (rs *FWRuleSet) FormatDetailed() string {
 	}
 	sb.WriteString("=" + strings.Repeat("=", 79) + "\n\n")
 
-	ruleNum := 1
+	ruleNum := 0
 
 	// If we have RuleLists, display rules organized by list
 	if len(rs.RuleLists) > 0 {
@@ -1449,6 +1482,18 @@ func (rs *FWRuleSet) FormatDetailed() string {
 			sb.WriteString(strings.Repeat("=", 79) + "\n\n")
 
 			for _, rule := range ruleList.Rules {
+				// Handle GROUP action as section separators (but still count them)
+				if rule.Action == "GROUP" {
+					sb.WriteString(strings.Repeat("─", 79) + "\n")
+					sb.WriteString(fmt.Sprintf("Rule #%d [SECTION]: %s\n", ruleNum, rule.Name))
+					if rule.Comment != "" {
+						sb.WriteString(fmt.Sprintf("Description: %s\n", rule.Comment))
+					}
+					sb.WriteString(strings.Repeat("─", 79) + "\n\n")
+					ruleNum++
+					continue
+				}
+
 				status := "ACTIVE"
 				if rule.Deactivated {
 					status = "DISABLED"
@@ -1487,13 +1532,26 @@ func (rs *FWRuleSet) FormatDetailed() string {
 		}
 	} else {
 		// Fallback to flat list if no RuleLists
-		for i, rule := range rs.Rules {
+		ruleNum := 0
+		for _, rule := range rs.Rules {
+			// Handle GROUP action as section separators (but still count them)
+			if rule.Action == "GROUP" {
+				sb.WriteString(strings.Repeat("─", 79) + "\n")
+				sb.WriteString(fmt.Sprintf("Rule #%d [SECTION]: %s\n", ruleNum, rule.Name))
+				if rule.Comment != "" {
+					sb.WriteString(fmt.Sprintf("Description: %s\n", rule.Comment))
+				}
+				sb.WriteString(strings.Repeat("─", 79) + "\n\n")
+				ruleNum++
+				continue
+			}
+
 			status := "ACTIVE"
 			if rule.Deactivated {
 				status = "DISABLED"
 			}
 
-			sb.WriteString(fmt.Sprintf("Rule #%d: %s [%s]\n", i+1, rule.Name, status))
+			sb.WriteString(fmt.Sprintf("Rule #%d: %s [%s]\n", ruleNum, rule.Name, status))
 			sb.WriteString(strings.Repeat("-", 50) + "\n")
 
 			if rule.Comment != "" {
@@ -1521,6 +1579,7 @@ func (rs *FWRuleSet) FormatDetailed() string {
 			}
 
 			sb.WriteString("\n")
+			ruleNum++
 		}
 	}
 
@@ -1638,7 +1697,7 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 	if opts.ShowRules {
 		sb.WriteString("## Rules\n")
 
-		ruleNum := 1
+		ruleNum := 0
 
 		// If we have RuleLists, display rules organized by list
 		if len(rs.RuleLists) > 0 {
@@ -1654,6 +1713,19 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 				}
 
 				for _, rule := range ruleList.Rules {
+					// Handle GROUP action as section separators (but still count them)
+					if rule.Action == "GROUP" {
+						sb.WriteString(fmt.Sprintf("RULE %03d [SECTION]: %s", ruleNum, rule.Name))
+						if rule.Comment != "" {
+							sb.WriteString(fmt.Sprintf(" (%s)", rule.Comment))
+						}
+						sb.WriteString("\n")
+						sb.WriteString(fmt.Sprintf("  LIST: %s\n", ruleList.Name))
+						sb.WriteString("\n")
+						ruleNum++
+						continue
+					}
+
 					status := ""
 					if rule.Deactivated {
 						status = " [DISABLED]"
@@ -1687,7 +1759,19 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 			}
 		} else {
 			// Fallback to flat list if no RuleLists
-			for i, rule := range rs.Rules {
+			ruleNum := 0
+			for _, rule := range rs.Rules {
+				// Handle GROUP action as section separators (but still count them)
+				if rule.Action == "GROUP" {
+					sb.WriteString(fmt.Sprintf("RULE %03d [SECTION]: %s", ruleNum, rule.Name))
+					if rule.Comment != "" {
+						sb.WriteString(fmt.Sprintf(" (%s)", rule.Comment))
+					}
+					sb.WriteString("\n\n")
+					ruleNum++
+					continue
+				}
+
 				status := ""
 				if rule.Deactivated {
 					status = " [DISABLED]"
@@ -1702,7 +1786,7 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 					actionStr = fmt.Sprintf("%s(%s)", rule.Action, rule.ActionDetail)
 				}
 
-				sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", i+1, rule.Name, status))
+				sb.WriteString(fmt.Sprintf("RULE %03d: %s%s\n", ruleNum, rule.Name, status))
 				sb.WriteString(fmt.Sprintf("  SRC: %s\n", strings.Join(rule.Source, " | ")))
 				sb.WriteString(fmt.Sprintf("  DST: %s\n", strings.Join(rule.Destination, " | ")))
 				sb.WriteString(fmt.Sprintf("  SVC: %s\n", strings.Join(rule.Service, " | ")))
@@ -1714,6 +1798,8 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 					sb.WriteString(fmt.Sprintf("  MAC: %s\n", rule.MAC))
 				}
 				sb.WriteString("\n")
+
+				ruleNum++
 			}
 		}
 	}
