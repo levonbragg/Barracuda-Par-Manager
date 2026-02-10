@@ -47,15 +47,43 @@ type FWUserObject struct {
 	Users   []string // Regular users, VPN users, groups, etc.
 }
 
+// FWURLObject represents a URL filtering object definition
+type FWURLObject struct {
+	Name    string
+	Type    string   // "policy" or "condition"
+	Comment string
+	URLs    []string // URL entries with actions (e.g., "domain.com [ALLOW]")
+}
+
 // FWRuleSet represents the entire ruleset
 type FWRuleSet struct {
-	Name           string
-	Comment        string
-	Rules          []FWRule
-	NetObjects     map[string]*FWNetObject
-	ServiceObjects map[string]*FWServiceObject
-	UserObjects    map[string]*FWUserObject
-	SubSets        map[string]*FWRuleSet
+	Name              string
+	Comment           string
+	EvalPolicyGlobal  bool // true = Policy Profiles Format, false = Legacy Application Rule Set
+	Rules             []FWRule
+	NetObjects        map[string]*FWNetObject
+	ServiceObjects    map[string]*FWServiceObject
+	UserObjects       map[string]*FWUserObject
+	URLObjects        map[string]*FWURLObject
+	SubSets           map[string]*FWRuleSet
+}
+
+// FormatType returns a human-readable format type string
+func (rs *FWRuleSet) FormatType() string {
+	if rs.EvalPolicyGlobal {
+		return "Policy Profiles Format"
+	}
+	return "Application Rule Set (Legacy)"
+}
+
+// IsPolicyProfilesFormat returns true if using the new Policy Profiles Format
+func (rs *FWRuleSet) IsPolicyProfilesFormat() bool {
+	return rs.EvalPolicyGlobal
+}
+
+// IsLegacyFormat returns true if using the legacy Application Rule Set format
+func (rs *FWRuleSet) IsLegacyFormat() bool {
+	return !rs.EvalPolicyGlobal
 }
 
 // Token types for the parser
@@ -206,12 +234,17 @@ func ParseFWRuleFile(content string) *FWRuleSet {
 		NetObjects:     make(map[string]*FWNetObject),
 		ServiceObjects: make(map[string]*FWServiceObject),
 		UserObjects:    make(map[string]*FWUserObject),
+		URLObjects:     make(map[string]*FWURLObject),
 		SubSets:        make(map[string]*FWRuleSet),
 	}
 
 	// Use regex-based parsing for reliability
 	ruleset.Name = extractValue(content, "name")
 	ruleset.Comment = extractValue(content, "comment")
+
+	// Check if this is Policy Profiles Format (new) or Application Rule Set (legacy)
+	evalPolicyGlobal := extractValue(content, "evalPolicyGlobal")
+	ruleset.EvalPolicyGlobal = (evalPolicyGlobal == "1")
 
 	// Extract network objects
 	parseNetObjects(content, ruleset)
@@ -221,6 +254,9 @@ func ParseFWRuleFile(content string) *FWRuleSet {
 
 	// Extract user objects
 	parseUserObjects(content, ruleset)
+
+	// Extract URL filtering objects
+	parseURLObjects(content, ruleset)
 
 	// Extract rules
 	parseRules(content, ruleset)
@@ -500,6 +536,125 @@ func parseUserSet(content string) *FWUserObject {
 	return obj
 }
 
+func parseURLObjects(content string, ruleset *FWRuleSet) {
+	// Parse URL category policies
+	urlPolicyPattern := regexp.MustCompile(`(?s)urlcatpolicyobj=\{(.*?)\n\t[a-z]+obj=`)
+	match := urlPolicyPattern.FindStringSubmatch(content)
+	if len(match) < 2 {
+		// Try alternate pattern
+		urlPolicyPattern = regexp.MustCompile(`(?s)urlcatpolicyobj=\{(.*?)\n\truleobj=`)
+		match = urlPolicyPattern.FindStringSubmatch(content)
+	}
+
+	if len(match) > 1 {
+		urlPolicySection := match[1]
+		urlPolicies := extractBlock(urlPolicySection, "UrlCatPolicy")
+		for _, up := range urlPolicies {
+			obj := parseURLPolicy(up)
+			if obj.Name != "" {
+				ruleset.URLObjects[obj.Name] = obj
+			}
+		}
+	}
+
+	// Parse URL category conditions
+	urlCondPattern := regexp.MustCompile(`(?s)urlcatcondobj=\{(.*?)\n\t[a-z]+obj=`)
+	match = urlCondPattern.FindStringSubmatch(content)
+	if len(match) < 2 {
+		// Try alternate pattern
+		urlCondPattern = regexp.MustCompile(`(?s)urlcatcondobj=\{(.*?)\n\truleobj=`)
+		match = urlCondPattern.FindStringSubmatch(content)
+	}
+
+	if len(match) > 1 {
+		urlCondSection := match[1]
+		urlConds := extractBlock(urlCondSection, "UrlCatCond")
+		for _, uc := range urlConds {
+			obj := parseURLCond(uc)
+			if obj.Name != "" {
+				// Avoid duplicates by checking if name already exists
+				if _, exists := ruleset.URLObjects[obj.Name]; !exists {
+					ruleset.URLObjects[obj.Name] = obj
+				}
+			}
+		}
+	}
+}
+
+func parseURLPolicy(content string) *FWURLObject {
+	obj := &FWURLObject{Type: "Policy Objects"}
+	obj.Name = extractValue(content, "name")
+	obj.Comment = extractValue(content, "comment")
+
+	// Extract custom list
+	customListPattern := regexp.MustCompile(`customlist=\{([^}]*)\}`)
+	if match := customListPattern.FindStringSubmatch(content); len(match) > 1 {
+		customList := match[1]
+		// Parse entries: domain.com|1 (1=allow, 2=block)
+		entries := strings.Split(customList, ",")
+		for _, entry := range entries {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			parts := strings.Split(entry, "|")
+			if len(parts) >= 2 {
+				domain := parts[0]
+				action := parts[1]
+				actionStr := ""
+				switch action {
+				case "1":
+					actionStr = "[ALLOW]"
+				case "2":
+					actionStr = "[BLOCK]"
+				default:
+					actionStr = "[" + action + "]"
+				}
+				obj.URLs = append(obj.URLs, domain+" "+actionStr)
+			}
+		}
+	}
+
+	return obj
+}
+
+func parseURLCond(content string) *FWURLObject {
+	obj := &FWURLObject{Type: "Match Objects"}
+	obj.Name = extractValue(content, "name")
+	obj.Comment = extractValue(content, "comment")
+
+	// Extract custom list
+	customListPattern := regexp.MustCompile(`customlist=\{([^}]*)\}`)
+	if match := customListPattern.FindStringSubmatch(content); len(match) > 1 {
+		customList := match[1]
+		// Parse entries: domain.com|1 (1=allow, 2=block)
+		entries := strings.Split(customList, ",")
+		for _, entry := range entries {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			parts := strings.Split(entry, "|")
+			if len(parts) >= 2 {
+				domain := parts[0]
+				action := parts[1]
+				actionStr := ""
+				switch action {
+				case "1":
+					actionStr = "[ALLOW]"
+				case "2":
+					actionStr = "[BLOCK]"
+				default:
+					actionStr = "[" + action + "]"
+				}
+				obj.URLs = append(obj.URLs, domain+" "+actionStr)
+			}
+		}
+	}
+
+	return obj
+}
+
 func parseRules(content string, ruleset *FWRuleSet) {
 	ruleBlocks := extractBlock(content, "\t\tRule")
 
@@ -752,12 +907,13 @@ type OutputOptions struct {
 	ShowNetworks bool
 	ShowServices bool
 	ShowUsers    bool
+	ShowURLs     bool
 	ShowRules    bool
 }
 
 // AllSections returns options to show all sections
 func AllSections() OutputOptions {
-	return OutputOptions{ShowNetworks: true, ShowServices: true, ShowUsers: true, ShowRules: true}
+	return OutputOptions{ShowNetworks: true, ShowServices: true, ShowUsers: true, ShowURLs: true, ShowRules: true}
 }
 
 // FormatCompact returns a compact human-readable representation
@@ -774,6 +930,7 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 	if rs.Comment != "" {
 		sb.WriteString(fmt.Sprintf("Description: %s\n", rs.Comment))
 	}
+	sb.WriteString(fmt.Sprintf("Format: %s\n", rs.FormatType()))
 	sb.WriteString("=" + strings.Repeat("=", 79) + "\n\n")
 
 	// Network Objects summary
@@ -839,6 +996,32 @@ func (rs *FWRuleSet) FormatCompactSelective(opts OutputOptions) string {
 				users = users[:47] + "..."
 			}
 			sb.WriteString(fmt.Sprintf("  %-30s = %s\n", name, users))
+		}
+		sb.WriteString("\n")
+	}
+
+	// URL Filtering Objects summary
+	if opts.ShowURLs && len(rs.URLObjects) > 0 {
+		sb.WriteString("URL FILTERING OBJECTS:\n")
+		sb.WriteString(strings.Repeat("-", 40) + "\n")
+
+		names := make([]string, 0, len(rs.URLObjects))
+		for name, obj := range rs.URLObjects {
+			// If Policy Profiles Format (new), skip Policy Objects and only show Match Objects
+			if rs.IsPolicyProfilesFormat() && obj.Type == "Policy Objects" {
+				continue
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			obj := rs.URLObjects[name]
+			typeStr := fmt.Sprintf("[%s]", strings.ToUpper(obj.Type))
+			sb.WriteString(fmt.Sprintf("  %-25s %-12s (%d URLs)\n", name, typeStr, len(obj.URLs)))
+			if obj.Comment != "" {
+				sb.WriteString(fmt.Sprintf("    # %s\n", obj.Comment))
+			}
 		}
 		sb.WriteString("\n")
 	}
@@ -952,7 +1135,8 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("# Ruleset: %s\n", rs.Name))
-	sb.WriteString(fmt.Sprintf("# Comment: %s\n\n", rs.Comment))
+	sb.WriteString(fmt.Sprintf("# Comment: %s\n", rs.Comment))
+	sb.WriteString(fmt.Sprintf("# Format: %s\n\n", rs.FormatType()))
 
 	// Network objects (sorted for stable diff)
 	if opts.ShowNetworks && len(rs.NetObjects) > 0 {
@@ -1001,6 +1185,27 @@ func (rs *FWRuleSet) FormatDiffableSelective(opts OutputOptions) string {
 			obj := rs.UserObjects[name]
 			sort.Strings(obj.Users)
 			sb.WriteString(fmt.Sprintf("USR %s = %s\n", name, strings.Join(obj.Users, " | ")))
+		}
+		sb.WriteString("\n")
+	}
+
+	// URL filtering objects (sorted)
+	if opts.ShowURLs && len(rs.URLObjects) > 0 {
+		sb.WriteString("## URL Filtering Objects\n")
+		names := make([]string, 0, len(rs.URLObjects))
+		for name, obj := range rs.URLObjects {
+			// If Policy Profiles Format (new), skip Policy Objects and only show Match Objects
+			if rs.IsPolicyProfilesFormat() && obj.Type == "Policy Objects" {
+				continue
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			obj := rs.URLObjects[name]
+			sort.Strings(obj.URLs)
+			sb.WriteString(fmt.Sprintf("URL %s [%s] = %s\n", name, obj.Type, strings.Join(obj.URLs, " | ")))
 		}
 		sb.WriteString("\n")
 	}

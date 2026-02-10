@@ -4,14 +4,24 @@ A command-line tool for parsing and extracting files from Barracuda backup archi
 
 ## Features
 
+### Archive Management
 - 📦 Parse unencrypted Barracuda PAR backup files (.par)
 - 🔐 Decrypt and parse encrypted PCA backup files (.pca) using OpenSSL-compatible AES-256-CBC
 - 📋 List archive contents with detailed file information
 - 🌳 Display directory structure as a tree
 - 📤 Extract individual files or entire archives
 - 🔍 Compare two backup archives
-- 🔥 Parse and compare firewall rules from Barracuda backups
 - 🔒 Secure password prompting with hidden input
+
+### Firewall Rule Analysis
+- 🔥 Parse and display firewall rules with selective output options
+- 🌐 Extract and display network objects (IPs, subnets, DNS names)
+- 🔌 Extract and display service objects (TCP/UDP ports, protocols)
+- 👥 Extract and display user objects (users, VPN users, groups)
+- 🌍 Extract and display URL filtering objects (allow/block lists)
+- 🔄 Compare firewall rules between backups
+- 📊 Automatic format detection (Policy Profiles vs Legacy Application Rule Set)
+- 📝 Support for both compact and diff-optimized output formats
 
 ## Installation
 
@@ -72,16 +82,76 @@ go build -o par_parser .
 
 ### Firewall Rules
 
+#### Basic Firewall Commands
+
 ```bash
-# Show firewall rules in compact format
+# Show all firewall rules (networks, services, users, URLs, and rules)
 ./par_parser fwrules backup.par
 
 # Show detailed firewall rules
 ./par_parser fwdetail backup.par
 
+# Show in diff-optimized format
+./par_parser fwrules -d backup.par
+
 # Compare firewall rules between backups
 ./par_parser fwdiff old.par new.par
 ```
+
+#### Selective Output with Flags
+
+Show only specific sections by combining flags:
+
+```bash
+# Show only network objects
+./par_parser fwrules -n backup.par
+
+# Show only service objects
+./par_parser fwrules -S backup.par
+
+# Show only user objects
+./par_parser fwrules -U backup.par
+
+# Show only URL filtering objects
+./par_parser fwrules -L backup.par
+
+# Show only rules (no objects)
+./par_parser fwrules -r backup.par
+
+# Combine flags to show multiple sections
+./par_parser fwrules -n -S -U backup.par
+./par_parser fwrules -n -S -U -L backup.par
+```
+
+#### Dedicated Object Commands
+
+For convenience, use dedicated commands for specific object types:
+
+```bash
+# Show only network objects
+./par_parser fwnetworks backup.par
+
+# Show only service objects
+./par_parser fwservices backup.par
+
+# Show only user objects
+./par_parser fwusers backup.par
+
+# Show only URL filtering objects
+./par_parser fwurls backup.par
+
+# Show only firewall rules (no objects)
+./par_parser fwruleonly backup.par
+```
+
+#### Format Detection
+
+The tool automatically detects the firewall format and adjusts output accordingly:
+
+- **Policy Profiles Format** (new): Shows only URL Match Objects
+- **Application Rule Set** (legacy): Shows both URL Policy Objects and Match Objects
+
+Format type is displayed in the output header for all firewall commands.
 
 ## Creating Encrypted Archives
 
@@ -99,7 +169,7 @@ echo "mypassword" | openssl enc -aes-256-cbc -salt -in backup.par -out backup.pc
 
 ## Command Reference
 
-### Commands
+### Archive Commands
 
 - `list` - List all entries in the archive
 - `tree` - Show entries in tree structure
@@ -108,11 +178,19 @@ echo "mypassword" | openssl enc -aes-256-cbc -salt -in backup.par -out backup.pc
 - `cat` - Print file content to stdout
 - `extract` - Extract files from archive
 - `diff` - Compare two archives
-- `fwrules` - Show firewall rules in compact format
+
+### Firewall Commands
+
+- `fwrules` - Show firewall rules in compact format (all objects + rules)
 - `fwdetail` - Show firewall rules in detailed format
 - `fwdiff` - Compare firewall rules between two backups
+- `fwnetworks` - Show only network objects from firewall rules
+- `fwservices` - Show only service objects from firewall rules
+- `fwusers` - Show only user objects from firewall rules
+- `fwurls` - Show only URL filtering objects from firewall rules
+- `fwruleonly` - Show only firewall rules (no objects)
 
-### Options
+### General Options
 
 - `-f, --filter <pattern>` - Filter entries by pattern
 - `-o, --output <dir>` - Output directory for extraction
@@ -120,10 +198,22 @@ echo "mypassword" | openssl enc -aes-256-cbc -salt -in backup.par -out backup.pc
 - `-c, --content` - Show content differences in diff
 - `-u, --unchanged` - Show unchanged files in diff
 - `-e, --ext <extension>` - Filter files by extension
-- `-d, --diffable` - Output in diff-optimized format (fwrules)
-- `-p, --path <path>` - Path to fwrule file within archive
 - `-F, --flat` - Extract files without directory structure
 - `-P, --password <password>` - Password for encrypted .pca files
+
+### Firewall Options
+
+These options work with the `fwrules` command to show selective output:
+
+- `-n, --networks` - Show only network objects
+- `-S, --services` - Show only service objects
+- `-U, --users` - Show only user objects
+- `-L, --urls` - Show only URL filtering objects
+- `-r, --rules` - Show only rules (no objects)
+- `-d, --diffable` - Output in diff-optimized format
+- `-p, --path <path>` - Path to fwrule file within archive
+
+**Note:** Combine multiple flags to show specific sections (e.g., `-n -S -U` shows networks, services, and users)
 
 ## File Format Details
 
@@ -134,7 +224,11 @@ Barracuda PAR (Phionar Archive) format is a binary format that stores:
 - Directory structure
 - File contents
 - Configuration files
-- Firewall rules
+- Firewall rules with comprehensive object definitions:
+  - Network objects (IP addresses, subnets, DNS names)
+  - Service objects (TCP/UDP ports, protocols, ICMP)
+  - User objects (users, VPN users, groups)
+  - URL filtering objects (policy objects and match conditions)
 
 ### .pca Files (Encrypted)
 
@@ -143,6 +237,39 @@ OpenSSL-compatible encrypted format:
 - **Format**: `Salted__` (8 bytes) + salt (8 bytes) + encrypted data
 - **Key Derivation**: EVP_BytesToKey with MD5 (for OpenSSL compatibility)
 - **Padding**: PKCS7
+
+### Firewall Object Types
+
+The parser extracts and displays four types of firewall objects:
+
+#### Network Objects
+- IP addresses and subnets (e.g., `192.168.1.0/24`)
+- DNS-based objects that resolve to IP addresses
+- Network sets and groups
+- References to other network objects
+
+#### Service Objects
+- TCP ports (e.g., `TCP/80`, `TCP/443`)
+- UDP ports (e.g., `UDP/53`, `UDP/123`)
+- ICMP protocol entries
+- Port ranges and service groups
+- References to other service objects
+
+#### User Objects
+- Regular users (`user:username`)
+- VPN users (`vpn:username`)
+- VPN groups (`vpngroup:groupname`)
+- Groups (`group:groupname`)
+- Wildcard patterns (`user:*`, `vpn:*`)
+
+#### URL Filtering Objects
+- **Policy Objects**: URL category policies with allow/block lists
+- **Match Objects**: URL category conditions for matching traffic
+- Domain names with actions (`[ALLOW]` or `[BLOCK]`)
+
+**Format-Specific Behavior:**
+- **Policy Profiles Format** (evalPolicyGlobal=1): Only Match Objects are displayed
+- **Application Rule Set** (Legacy): Both Policy Objects and Match Objects are displayed
 
 ## Security
 

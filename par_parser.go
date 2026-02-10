@@ -802,6 +802,7 @@ Commands:
   fwnetworks Show only network objects from firewall rules
   fwservices Show only service objects from firewall rules
   fwusers    Show only user objects from firewall rules
+  fwurls     Show only URL filtering objects from firewall rules
   fwruleonly Show only firewall rules (no objects)
 
 Options:
@@ -821,6 +822,7 @@ Options:
   -n, --networks           Show only network objects
   -S, --services           Show only service objects
   -U, --users              Show only user objects
+  -L, --urls               Show only URL filtering objects
   -r, --rules              Show only rules (no objects)
                            (combine flags to show multiple sections)
 
@@ -847,11 +849,13 @@ Examples:
   par_parser fwrules -n backup.par              (show only network objects)
   par_parser fwrules -S backup.par              (show only service objects)
   par_parser fwrules -U backup.par              (show only user objects)
+  par_parser fwrules -L backup.par              (show only URL filtering objects)
   par_parser fwrules -r backup.par              (show only rules)
-  par_parser fwrules -n -S -U backup.par        (show networks, services, and users)
+  par_parser fwrules -n -S -U -L backup.par     (show networks, services, users, and URLs)
   par_parser fwnetworks backup.par              (dedicated command for networks)
   par_parser fwservices backup.par              (dedicated command for services)
   par_parser fwusers backup.par                 (dedicated command for users)
+  par_parser fwurls backup.par                  (dedicated command for URLs)
   par_parser fwruleonly backup.par              (dedicated command for rules only)
   par_parser fwdetail backup.par
   par_parser fwdiff old.par new.par
@@ -873,7 +877,7 @@ func main() {
 	// Parse flags
 	var filter, output, ext, fwPath, password string
 	var showSize, showContent, showUnchanged, diffable, flat bool
-	var showNetworks, showServices, showUsers, showRules bool
+	var showNetworks, showServices, showUsers, showURLs, showRules bool
 	args := os.Args[2:]
 	var positionalArgs []string
 
@@ -924,6 +928,8 @@ func main() {
 			showServices = true
 		case "-U", "--users":
 			showUsers = true
+		case "-L", "--urls":
+			showURLs = true
 		case "-r", "--rules":
 			showRules = true
 		default:
@@ -1038,7 +1044,7 @@ func main() {
 
 		// Determine what to show based on flags
 		opts := OutputOptions{}
-		if !showNetworks && !showServices && !showUsers && !showRules {
+		if !showNetworks && !showServices && !showUsers && !showURLs && !showRules {
 			// No flags specified, show all (default behavior)
 			opts = AllSections()
 		} else {
@@ -1046,6 +1052,7 @@ func main() {
 			opts.ShowNetworks = showNetworks
 			opts.ShowServices = showServices
 			opts.ShowUsers = showUsers
+			opts.ShowURLs = showURLs
 			opts.ShowRules = showRules
 		}
 
@@ -1106,6 +1113,25 @@ func main() {
 		}
 		ruleset := ParseFWRuleFile(fwContent)
 		opts := OutputOptions{ShowUsers: true}
+		if diffable {
+			fmt.Print(ruleset.FormatDiffableSelective(opts))
+		} else {
+			fmt.Print(ruleset.FormatCompactSelective(opts))
+		}
+
+	case "fwurls":
+		archive, err := LoadArchive(positionalArgs[0], password)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		fwContent := findFWRuleContent(archive, fwPath)
+		if fwContent == "" {
+			fmt.Println("Error: No firewall rule file found")
+			os.Exit(1)
+		}
+		ruleset := ParseFWRuleFile(fwContent)
+		opts := OutputOptions{ShowURLs: true}
 		if diffable {
 			fmt.Print(ruleset.FormatDiffableSelective(opts))
 		} else {

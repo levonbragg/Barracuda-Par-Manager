@@ -10,6 +10,9 @@
 *.pca
 *.pgz
 
+# Barracuda Files
+*.fwrule
+*.fwrule7
 
 # Test binary, built with `go test -c`
 *.test
